@@ -1569,7 +1569,6 @@ ngx_http_flv_live_preprocess(ngx_http_request_t *r,
 {
     ngx_http_flv_live_ctx_t     *ctx;
     ngx_listening_t             *ls;
-    struct sockaddr             *local_sockaddr;
 
     struct sockaddr_in          *ls_sin, *sin;
 #if (NGX_HAVE_INET6)
@@ -1624,12 +1623,7 @@ ngx_http_flv_live_preprocess(ngx_http_request_t *r,
     ls = ngx_cycle->listening.elts;
     for (n = 0; n < ngx_cycle->listening.nelts; ++n, ++ls) {
         if (ls->handler == ngx_rtmp_init_connection) {
-            local_sockaddr = r->connection->local_sockaddr;
             sa_family = ls->sockaddr->sa_family;
-
-            if (local_sockaddr->sa_family != sa_family) {
-                continue;
-            }
 
             switch (sa_family) {
 
