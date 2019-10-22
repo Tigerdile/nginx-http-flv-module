@@ -981,9 +981,16 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         }
 
         if (handler->meta == NULL && meta_version != pctx->meta_version) {
-            handler->meta = handler->meta_message_pt(ss, codec_ctx->meta);
-            if (handler->meta == NULL) {
-                continue;
+            if (codec_ctx->meta) {
+                handler->meta = handler->meta_message_pt(ss, codec_ctx->meta);
+                if (handler->meta == NULL) {
+                    continue;
+                }
+            } else {
+                ngx_log_error(NGX_LOG_WARN, ss->connection->log, 0,
+                              "live: no meta");
+
+                pctx->meta_version = meta_version;
             }
         }
 
@@ -1016,20 +1023,22 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
                 continue;
             }
 
-            if (lacf->wait_video && h->type == NGX_RTMP_MSG_AUDIO &&
-                !pctx->cs[0].active)
-            {
-                ngx_log_debug0(NGX_LOG_DEBUG_RTMP, ss->connection->log, 0,
-                               "live: waiting for video");
-                continue;
-            }
+            if (codec_ctx->video_codec_id) {
+                if (lacf->wait_video && h->type == NGX_RTMP_MSG_AUDIO &&
+                    !pctx->cs[0].active)
+                {
+                    ngx_log_debug0(NGX_LOG_DEBUG_RTMP, ss->connection->log, 0,
+                                   "live: waiting for video");
+                    continue;
+                }
 
-            if (lacf->wait_key && prio != NGX_RTMP_VIDEO_KEY_FRAME &&
-               (lacf->interleave || h->type == NGX_RTMP_MSG_VIDEO))
-            {
-                ngx_log_debug0(NGX_LOG_DEBUG_RTMP, ss->connection->log, 0,
-                               "live: skip non-key");
-                continue;
+                if (lacf->wait_key && prio != NGX_RTMP_VIDEO_KEY_FRAME &&
+                   (lacf->interleave || h->type == NGX_RTMP_MSG_VIDEO))
+                {
+                    ngx_log_debug0(NGX_LOG_DEBUG_RTMP, ss->connection->log, 0,
+                                   "live: skip non-key");
+                    continue;
+                }
             }
 
             if (header || coheader) {
@@ -1178,6 +1187,7 @@ static ngx_int_t
 ngx_rtmp_live_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     ngx_chain_t *in, ngx_rtmp_amf_elt_t *out_elts, ngx_uint_t out_elts_size)
 {
+    ngx_rtmp_live_proc_handler_t   *handler;
     ngx_rtmp_live_ctx_t            *ctx, *pctx;
     ngx_chain_t                    *data, *rpkt;
     ngx_rtmp_core_srv_conf_t       *cscf;
@@ -1190,6 +1200,7 @@ ngx_rtmp_live_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     ngx_uint_t                      peers;
     uint32_t                        delta;
     ngx_rtmp_live_chunk_stream_t   *cs;
+    ngx_http_request_t             *r;
 #ifdef NGX_DEBUG
     u_char                         *msg_type;
 
@@ -1254,7 +1265,6 @@ ngx_rtmp_live_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     delta = ch.timestamp - cs->timestamp;
 
     rpkt = ngx_rtmp_append_shared_bufs(cscf, data, in);
-    ngx_rtmp_prepare_message(s, &ch, NULL, rpkt);
 
     for (pctx = ctx->stream->ctx; pctx; pctx = pctx->next) {
         if (pctx == ctx || pctx->paused) {
@@ -1262,11 +1272,35 @@ ngx_rtmp_live_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         }
 
         ss = pctx->session;
+        handler = ngx_rtmp_live_proc_handlers[pctx->protocol];
+        if (pctx->protocol == NGX_RTMP_PROTOCOL_HTTP) {
+            r = ss->data;
+            if (r == NULL || (r->connection && r->connection->destroyed)) {
+                continue;
+            }
 
-        if (ngx_rtmp_send_message(ss, rpkt, prio) != NGX_OK) {
-            ++pctx->ndropped;
-            cs->dropped += delta;
-            continue;
+            handler->meta = handler->append_message_pt(ss, &ch, NULL, rpkt);
+            if (handler->meta == NULL) {
+                continue;
+            }
+
+            if (handler->send_message_pt(ss, handler->meta, 0) != NGX_OK) {
+                ++pctx->ndropped;
+                cs->dropped += delta;
+                handler->free_message_pt(ss, handler->meta);
+                handler->meta = NULL;
+                continue;
+            }
+
+            handler->free_message_pt(ss, handler->meta);
+            handler->meta = NULL;
+        } else {
+            ngx_rtmp_prepare_message(s, &ch, NULL, rpkt);
+            if (ngx_rtmp_send_message(ss, rpkt, prio) != NGX_OK) {
+                ++pctx->ndropped;
+                cs->dropped += delta;
+                continue;
+            }
         }
 
         cs->timestamp += delta;
@@ -1494,16 +1528,8 @@ ngx_rtmp_live_play(ngx_rtmp_session_t *s, ngx_rtmp_play_t *v)
         /* request from http */
         r = s->data;
         if (r) {
-            if (s->wait_notify_play) {
-                if (ngx_http_flv_live_join(s, v->name, 0) == NGX_ERROR) {
-                    r->main->count--;
-
-                    return NGX_ERROR;
-                }
-
-                s->wait_notify_play = 0;
-            }
-
+            ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                          "live: play from HTTP");
             goto next;
         }
     }

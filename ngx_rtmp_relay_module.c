@@ -1,7 +1,7 @@
 
 /*
- * Copyright (C) Roman Arutyunyan 
- * Copyright (C) Winshining 
+ * Copyright (C) Roman Arutyunyan
+ * Copyright (C) Winshining
  */
 
 
@@ -335,12 +335,11 @@ ngx_rtmp_relay_create_connection(ngx_rtmp_conf_ctx_t *cctx, ngx_str_t* name,
     ngx_connection_t               *c;
     ngx_addr_t                     *addr;
     ngx_pool_t                     *pool;
+    size_t                          len;
     ngx_int_t                       rc;
     ngx_str_t                       v, *uri;
     u_char                         *first, *last, *p;
-#if (NGX_HAVE_UNIX_DOMAIN)
-    u_char                         *client;
-#endif
+    u_char                          buf[NGX_SOCKADDR_STRLEN];
 
     racf = ngx_rtmp_get_module_app_conf(cctx, ngx_rtmp_relay_module);
 
@@ -466,22 +465,28 @@ ngx_rtmp_relay_create_connection(ngx_rtmp_conf_ctx_t *cctx, ngx_str_t* name,
     c = pc->connection;
     c->pool = pool;
 
-#if (NGX_HAVE_UNIX_DOMAIN)
-    if (addr->sockaddr->sa_family == AF_UNIX) {
-        client = ngx_pcalloc(pool, rctx->url.len + 8);
-        if (client == NULL) {
-            return NULL;
+    if (addr->sockaddr->sa_family != AF_UNIX) {
+        len = ngx_sock_ntop(pc->sockaddr,
+#if (nginx_version >= 1005003)
+                            pc->socklen,
+#endif
+                            buf, NGX_SOCKADDR_STRLEN, 0);
+
+        c->addr_text.data = ngx_pcalloc(pool, len);
+        if (c->addr_text.data == NULL) {
+            ngx_log_error(NGX_LOG_ERR, racf->log, 0,
+                          "relay: allocation for address failed");
+            goto clear;
         }
 
-        *ngx_cpymem(client, rctx->url.data,
-                    ngx_strlen(rctx->url.data)) = 0;
+        c->addr_text.len = len;
+        ngx_memcpy(c->addr_text.data, buf, len);
+    }
 
-        p = (u_char *) ngx_strchr(client, '.');
-        *ngx_snprintf(p + 1, client + rctx->url.len + 8 - (p + 1), "%i",
-                      ngx_process_slot) = 0;
-
-        c->addr_text.data = client;
-        c->addr_text.len = ngx_strlen(client);
+#if (NGX_HAVE_UNIX_DOMAIN)
+    if (addr->sockaddr->sa_family == AF_UNIX) {
+        c->addr_text.data = target->url.host.data;
+        c->addr_text.len = target->url.host.len;
     }
 #endif
 
@@ -1463,7 +1468,7 @@ static void
 ngx_rtmp_relay_close(ngx_rtmp_session_t *s)
 {
     ngx_rtmp_relay_app_conf_t          *racf;
-    ngx_rtmp_relay_ctx_t               *ctx, **cctx;
+    ngx_rtmp_relay_ctx_t               *ctx, **cctx, **next;
     ngx_uint_t                          hash;
 
     racf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_relay_module);
@@ -1533,12 +1538,17 @@ ngx_rtmp_relay_close(ngx_rtmp_session_t *s)
         ngx_del_timer(&ctx->push_evt);
     }
 
-    for (cctx = &ctx->play; *cctx; cctx = &(*cctx)->next) {
+    for (cctx = &ctx->play; *cctx; /* cctx = &(*cctx)->next */) {
         (*cctx)->publish = NULL;
         ngx_log_debug2(NGX_LOG_DEBUG_RTMP, (*cctx)->session->connection->log,
             0, "relay: play disconnect orphan app='%V' name='%V'",
             &(*cctx)->app, &(*cctx)->name);
+
+        next = &(*cctx)->next;
+
         ngx_rtmp_finalize_session((*cctx)->session);
+
+        cctx = next;
     }
     ctx->publish = NULL;
 

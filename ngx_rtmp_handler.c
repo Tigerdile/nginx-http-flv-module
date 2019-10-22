@@ -1,15 +1,14 @@
 
 /*
- * Copyright (C) Roman Arutyunyan 
- * Copyright (C) Winshining 
+ * Copyright (C) Roman Arutyunyan
+ * Copyright (C) Winshining
  */
 
 
 #include <ngx_config.h>
 #include <ngx_core.h>
-#include "ngx_rtmp.h"
+#include "ngx_rtmp_live_module.h"
 #include "ngx_rtmp_amf.h"
-#include "ngx_rtmp_cmd_module.h"
 
 
 static void ngx_rtmp_recv(ngx_event_t *rev);
@@ -503,6 +502,7 @@ ngx_rtmp_send(ngx_event_t *wev)
     ngx_connection_t           *c;
     ngx_rtmp_session_t         *s;
     ngx_int_t                   n;
+    ngx_rtmp_live_ctx_t        *lctx;
     ngx_rtmp_core_srv_conf_t   *cscf;
 
     c = wev->data;
@@ -565,6 +565,11 @@ ngx_rtmp_send(ngx_event_t *wev)
         }
     }
 
+    lctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_live_module);
+    if (lctx && !lctx->publishing && !wev->timer_set) {
+        ngx_add_timer(wev, s->timeout);
+    }
+
     if (wev->active) {
         ngx_del_event(wev, NGX_WRITE_EVENT, 0);
     }
@@ -615,9 +620,27 @@ ngx_rtmp_prepare_message(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
                 ++fmt;
             }
         }
-        timestamp = h->timestamp - lh->timestamp;
+
+        if (h->type == NGX_RTMP_MSG_VIDEO || h->type == NGX_RTMP_MSG_AUDIO) {
+            timestamp = h->timestamp - s->offset_timestamp - lh->timestamp;
+
+            if (lh->timestamp) {
+                timestamp += s->offset_timestamp;
+            }
+        } else {
+            timestamp = h->timestamp - lh->timestamp;
+        }
     } else {
-        timestamp = h->timestamp;
+        if (h->type == NGX_RTMP_MSG_VIDEO || h->type == NGX_RTMP_MSG_AUDIO) {
+            if (!s->offset_timestamp_set) {
+                s->offset_timestamp_set = 1;
+                s->offset_timestamp = h->timestamp;
+            } else if (h->timestamp == 0) {
+                s->offset_timestamp = 0;
+            }
+        }
+
+        timestamp = h->timestamp - s->offset_timestamp;
     }
 
     /*if (lh) {
@@ -722,10 +745,8 @@ ngx_rtmp_send_message(ngx_rtmp_session_t *s, ngx_chain_t *out,
         ngx_uint_t priority)
 {
     ngx_uint_t                      nmsg;
-    ssize_t                         delta;
 
-    delta = s->out_last - s->out_pos;
-    nmsg = (delta >= 0 ? delta : -delta) % s->out_queue + 1;
+    nmsg = (s->out_last + s->out_queue - s->out_pos) % s->out_queue + 1;
 
     if (priority > 3) {
         priority = 3;
